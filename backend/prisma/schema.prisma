@@ -1,0 +1,88 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String     @id @default(cuid())
+  googleId  String     @unique
+  name      String
+  email     String     @unique
+  avatarUrl String?
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+  senders   Sender[]
+  campaigns Campaign[]
+}
+
+model Sender {
+  id        String     @id @default(cuid())
+  userId    String
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  email     String
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+  campaigns Campaign[]
+  emailJobs EmailJob[]
+
+  @@unique([userId, email])
+  @@index([userId])
+}
+
+enum CampaignStatus {
+  SCHEDULED
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+model Campaign {
+  id          String         @id @default(cuid())
+  userId      String
+  user        User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  senderId    String
+  sender      Sender         @relation(fields: [senderId], references: [id])
+  subject     String
+  body        String
+  startTime   DateTime
+  delayMs     Int
+  hourlyLimit Int
+  status      CampaignStatus @default(SCHEDULED)
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+  emailJobs   EmailJob[]
+
+  @@index([userId])
+}
+
+enum EmailStatus {
+  SCHEDULED
+  PROCESSING
+  SENT
+  FAILED
+}
+
+model EmailJob {
+  id          String      @id @default(cuid())
+  campaignId  String
+  campaign    Campaign    @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  senderId    String
+  sender      Sender      @relation(fields: [senderId], references: [id])
+  recipient   String
+  scheduledAt DateTime
+  sentAt      DateTime?
+  status      EmailStatus @default(SCHEDULED)
+  attempts    Int         @default(0)
+  messageId   String?
+  error       String?
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  @@index([campaignId])
+  @@index([status])
+  @@index([senderId, scheduledAt])
+}
