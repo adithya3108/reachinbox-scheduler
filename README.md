@@ -299,8 +299,69 @@ With Docker infra up and `backend`/`frontend` both running (`npm run dev` + `npm
 
 ## 16. Deployment
 
-**A single AWS EC2 instance running the full stack via Docker Compose** — Postgres, Redis, the
-API, the worker, and an nginx-served frontend build, as five containers on one host
+Two deployment paths are documented. **Option A (managed free tiers)** is the one actually used
+for this submission — no server to manage, nothing to keep alive. **Option B (AWS EC2)** is kept
+below since the `docker-compose.prod.yml` stack it uses was built and verified first, and is a
+more realistic "how you'd actually run this" reference.
+
+### Option A: Vercel/Netlify + Render + Supabase + Upstash (all free tier)
+
+- **Frontend** → Vercel or Netlify (static Vite build)
+- **API + worker** → Render (two separate free Web Services — see note below on the worker)
+- **Postgres** → Supabase free plan
+- **Redis** → Upstash free plan
+
+**Why the worker is a "Web Service" and not a "Background Worker"**: Render's free tier only
+offers free Web Services (HTTP-triggered, sleep after 15 min idle); a real Background Worker
+needs a paid plan. `emailWorker.ts` now binds a trivial HTTP health endpoint to `$PORT` when one
+is set (see `startHealthServerIfConfigured` in `backend/src/workers/emailWorker.ts`) purely so
+Render classifies it as a Web Service — it has no effect on job processing. Point a free
+external ping service (e.g. cron-job.org, every 10 minutes) at that health URL to keep it awake.
+
+**What this costs you in reliability**: while asleep, no delayed jobs fire — a job scheduled for
+right now might not actually send until the next ping wakes the service, up to ~10-15 minutes
+late. It will never be lost or double-sent: the crash-recovery reconciliation and idempotent
+claim logic (sections 9-10) already handle a worker that stops and restarts arbitrarily, and a
+Render sleep cycle is exactly that. This is a real trade-off worth calling out in review: fine
+for a demo, not acceptable for a real SLA on send timing.
+
+1. **Supabase**: create a project at supabase.com → Project Settings → Database. Copy the
+   **Connection pooling** string (port 6543) as `DATABASE_URL`, and the **direct connection**
+   string (port 5432) as `DIRECT_URL`. Both need `?pgbouncer=true` / normal Postgres SSL params
+   as Supabase's UI shows them — copy them exactly as given.
+2. **Upstash**: create a free Redis database at upstash.com → copy the `rediss://...` connection
+   string as `REDIS_URL` (note the extra `s` — it's TLS; `ioredis`/BullMQ handle this natively).
+3. **Render — API service**: New → Web Service → connect this repo, root directory `backend/`.
+   - Build command: `npm install && npx prisma generate && npx prisma migrate deploy && npm run build`
+   - Start command: `node dist/server.js`
+   - Add all the env vars from `.env.example` (`DATABASE_URL`, `DIRECT_URL`, `REDIS_URL`,
+     `SESSION_SECRET`, `COOKIE_SECURE=true`, Google + Ethereal creds, etc.) plus
+     `FRONTEND_URL=https://<your-vercel-app>.vercel.app` and
+     `GOOGLE_CALLBACK_URL=https://<this-render-service>.onrender.com/api/auth/google/callback`.
+4. **Render — worker service**: New → Web Service → same repo/root directory.
+   - Build command: same as above.
+   - Start command: `node dist/workers/emailWorker.js`
+   - Same env vars (Render auto-injects `PORT`, which is what makes the health-server trick
+     work) minus `FRONTEND_URL`/`GOOGLE_CALLBACK_URL` (not needed by the worker).
+   - Point an external pinger (cron-job.org or similar) at
+     `https://<worker-service>.onrender.com/` every 10 minutes.
+5. **Vercel**: import the repo, root directory `frontend/`, env var
+   `VITE_API_URL=https://<api-service>.onrender.com`. `frontend/vercel.json` already handles SPA
+   routing.
+6. **Google Cloud Console**: add the Render API service's callback URL as an authorized redirect
+   URI, and the Vercel URL as an authorized JavaScript origin.
+7. Verify: `curl https://<api-service>.onrender.com/api/health`, then visit the Vercel URL and
+   sign in.
+
+Because the frontend (Vercel) and API (Render) are on different domains here, this path *does*
+need the cross-site cookie behavior (`COOKIE_SECURE=true`, which forces `SameSite=None`) — unlike
+Option B's same-origin nginx proxy. This works because both Vercel and Render serve over HTTPS
+by default.
+
+### Option B: AWS EC2 (single instance, Docker Compose)
+
+A single AWS EC2 instance running the full stack via Docker Compose — Postgres, Redis, the API,
+the worker, and an nginx-served frontend build, as five containers on one host
 (`docker-compose.prod.yml`). This fits AWS's free tier: a `t2.micro`/`t3.micro` instance gets
 750 hours/month free for 12 months on a new-ish account.
 
@@ -315,7 +376,7 @@ Verified locally before touching AWS: `docker compose -f docker-compose.prod.yml
 brings up all five containers cleanly, `/api/health` responds, and the worker starts — same
 command you'll run on the EC2 host.
 
-### 1. Launch the EC2 instance
+#### 1. Launch the EC2 instance
 
 1. AWS Console → EC2 → Launch instance. AMI: **Ubuntu 22.04 LTS**. Instance type: **t2.micro**
    (or t3.micro) to stay in the free tier.
@@ -327,7 +388,7 @@ command you'll run on the EC2 host.
    on stop/start, which would break your Google OAuth redirect URI and CORS config every time.
 5. Launch, then SSH in: `ssh -i your-key.pem ubuntu@<elastic-ip>`.
 
-### 2. Install Docker on the instance
+#### 2. Install Docker on the instance
 
 ```bash
 sudo apt-get update
@@ -341,7 +402,7 @@ sudo usermod -aG docker $USER
 # log out and back in for the group change to take effect
 ```
 
-### 3. Deploy the app
+#### 3. Deploy the app
 
 ```bash
 git clone https://github.com/<you>/reachinbox-scheduler.git
@@ -382,13 +443,13 @@ docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
 This builds and starts all five containers; the `api` service runs `prisma migrate deploy`
 before starting, so the schema is applied automatically on first boot.
 
-### 4. Wire up Google OAuth
+#### 4. Wire up Google OAuth
 
 In Google Cloud Console → Credentials, add:
 - Authorized redirect URI: `http://<elastic-ip>/api/auth/google/callback`
 - Authorized JavaScript origin: `http://<elastic-ip>`
 
-### 5. Verify
+#### 5. Verify
 
 ```bash
 curl http://<elastic-ip>/api/health   # {"data":{"ok":true}}

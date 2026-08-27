@@ -46,6 +46,7 @@ services:
     # cross-site cookie (see COOKIE_SECURE below).
     environment:
       DATABASE_URL: "postgresql://reachinbox:reachinbox@postgres:5432/reachinbox?schema=public"
+      DIRECT_URL: "postgresql://reachinbox:reachinbox@postgres:5432/reachinbox?schema=public"
       REDIS_URL: "redis://redis:6379"
       NODE_ENV: production
       PORT: 4000

@@ -1,4 +1,5 @@
 import { Worker, Job } from "bullmq";
+import http from "http";
 import { redisConnection } from "../config/redis";
 import { env } from "../config/env";
 import { logger } from "../config/logger";
@@ -160,7 +161,30 @@ export function startEmailWorker() {
   return worker;
 }
 
+/**
+ * Some free hosts (e.g. Render) only offer a free tier for HTTP "Web
+ * Service" deployments, not for background workers. Binding to $PORT with
+ * a trivial health-check response lets the worker be deployed as one of
+ * those, pinged by an external uptime service to prevent it from sleeping.
+ * This is purely for hosting classification -- it has no effect on job
+ * processing, and is a no-op locally/on EC2 where PORT isn't set for the
+ * worker service.
+ */
+function startHealthServerIfConfigured() {
+  if (!process.env.PORT) return;
+  const port = Number(process.env.PORT);
+  http
+    .createServer((_req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ data: { ok: true } }));
+    })
+    .listen(port, () => {
+      logger.info({ port }, "worker health server listening");
+    });
+}
+
 if (require.main === module) {
+  startHealthServerIfConfigured();
   reconcileStuckJobs()
     .catch((err) => logger.error({ err }, "reconciliation failed"))
     .finally(() => startEmailWorker());
