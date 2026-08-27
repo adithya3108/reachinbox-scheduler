@@ -296,3 +296,55 @@ With Docker infra up and `backend`/`frontend` both running (`npm run dev` + `npm
    time/delay/hourly limit, click **Schedule**.
 7. Watch the **Scheduled Emails** tab, then **Sent Emails** as the worker processes the queue.
    Ethereal preview links are printed in the worker's console log for each send.
+
+## 16. Deployment
+
+**Frontend → Vercel. Backend (Postgres + Redis + API + worker) → one free Hugging Face Space
+(Docker SDK).**
+
+**Trade-off, stated plainly**: bundling Postgres, Redis, the API, and the worker into a single
+container is not how you'd run this for real users — it has no persistent volume on the HF free
+tier, so a Space rebuild/restart wipes the in-container database and queue state. It is chosen
+here because it is genuinely free and requires no extra accounts. A more durable free option is
+Vercel (frontend) + Neon (managed Postgres) + Upstash (managed Redis) + Render free web service
+(API + worker) — every piece persists independently, at the cost of a few more sign-ups. Swap
+`DATABASE_URL`/`REDIS_URL` to point at those and the same code runs unchanged.
+
+### Deploying the backend to Hugging Face Spaces
+
+1. Create a new Space at https://huggingface.co/new-space with **SDK: Docker**, any visibility.
+2. Clone the Space's own git repo it gives you (a separate remote from GitHub), then copy this
+   project's `Dockerfile`, `docker/`, and `backend/` directories into it — but **keep the
+   Space's auto-generated `README.md`** (it carries the YAML frontmatter Hugging Face needs to
+   detect the Docker SDK; don't overwrite it with this project's README).
+3. In the Space's **Settings → Repository secrets**, add:
+   ```
+   GOOGLE_CLIENT_ID=...
+   GOOGLE_CLIENT_SECRET=...
+   GOOGLE_CALLBACK_URL=https://<your-space>.hf.space/api/auth/google/callback
+   FRONTEND_URL=https://<your-vercel-app>.vercel.app
+   SESSION_SECRET=<a long random string>
+   ETHEREAL_USER=...
+   ETHEREAL_PASSWORD=...
+   WORKER_CONCURRENCY=5
+   MIN_DELAY_MS=2000
+   MAX_EMAILS_PER_HOUR=100
+   ```
+   (`DATABASE_URL`, `REDIS_URL`, `PORT`, and `NODE_ENV` are already baked into the `Dockerfile`
+   for the in-container Postgres/Redis — don't override them.)
+4. Add `https://<your-space>.hf.space/api/auth/google/callback` as an authorized redirect URI
+   in the Google Cloud Console (same place as the local setup in section 4).
+5. Commit and push to the Space's git remote. Hugging Face builds the `Dockerfile` and starts
+   the container automatically; watch the build logs in the Space's **Logs** tab. First boot
+   takes longer (Postgres initdb + `prisma migrate deploy`).
+6. Confirm `https://<your-space>.hf.space/api/health` returns `{"data":{"ok":true}}`.
+
+### Deploying the frontend to Vercel
+
+1. Import this GitHub repo into Vercel, set **Root Directory** to `frontend/`.
+2. Framework preset: Vite (auto-detected).
+3. Add environment variable: `VITE_API_URL=https://<your-space>.hf.space`.
+4. Deploy. `frontend/vercel.json` already handles SPA client-side routing (React Router).
+5. Update the Space's `FRONTEND_URL` secret (step 3 above) to match the final Vercel URL, and
+   redeploy the Space if it was set to a placeholder first — CORS and the OAuth redirect both
+   depend on it matching exactly.
