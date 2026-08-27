@@ -15,14 +15,18 @@ RUN apt-get update && \
 ENV PGDATA=/var/lib/postgresql/data \
     DATABASE_URL="postgresql://reachinbox:reachinbox@localhost:5432/reachinbox?schema=public" \
     REDIS_URL="redis://localhost:6379" \
-    NODE_ENV=production \
     PORT=7860
 
 WORKDIR /app/backend
 COPY backend/package.json backend/package-lock.json ./
+# devDependencies (typescript, prisma CLI) are needed to build; installed
+# before NODE_ENV=production is set, since `npm ci` skips them otherwise.
 RUN npm ci
 COPY backend/ ./
-RUN npx prisma generate && npm run build
+RUN npx prisma generate && npm run build && npm prune --omit=dev
+
+# Set production mode only after the build so it doesn't affect npm ci above.
+ENV NODE_ENV=production
 
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
