@@ -15,6 +15,10 @@ export const env = {
   databaseUrl: required("DATABASE_URL"),
   redisUrl: process.env.REDIS_URL ?? "redis://localhost:6379",
   sessionSecret: process.env.SESSION_SECRET ?? "dev-secret-change-me",
+  // Explicit opt-in, independent of NODE_ENV: only set this once the app is
+  // actually served over HTTPS (browsers silently drop cookies marked
+  // Secure over plain HTTP, which would otherwise break login).
+  cookieSecure: process.env.COOKIE_SECURE === "true",
 
   googleClientId: process.env.GOOGLE_CLIENT_ID ?? "",
   googleClientSecret: process.env.GOOGLE_CLIENT_SECRET ?? "",

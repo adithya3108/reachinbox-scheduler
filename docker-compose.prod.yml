@@ -1,0 +1,102 @@
+# Production stack for a single EC2 host. Run with:
+#   docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
+#
+# All five services (Postgres, Redis, API, worker, frontend) live on one
+# instance for simplicity. See README.md "Deployment" for scaling this
+# beyond a single host later.
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: reachinbox
+      POSTGRES_PASSWORD: reachinbox
+      POSTGRES_DB: reachinbox
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U reachinbox"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build: ./backend
+    restart: unless-stopped
+    command: ["sh", "-c", "npx prisma migrate deploy && node dist/server.js"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # No published port: nginx (the frontend container) reverse-proxies
+    # /api/ to this service over the internal Docker network, so the app
+    # is same-origin from the browser's perspective and never needs a
+    # cross-site cookie (see COOKIE_SECURE below).
+    environment:
+      DATABASE_URL: "postgresql://reachinbox:reachinbox@postgres:5432/reachinbox?schema=public"
+      REDIS_URL: "redis://redis:6379"
+      NODE_ENV: production
+      PORT: 4000
+      FRONTEND_URL: ${FRONTEND_URL}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      SESSION_SECRET: ${SESSION_SECRET}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
+      GOOGLE_CALLBACK_URL: ${GOOGLE_CALLBACK_URL}
+      ETHEREAL_HOST: ${ETHEREAL_HOST}
+      ETHEREAL_PORT: ${ETHEREAL_PORT}
+      ETHEREAL_USER: ${ETHEREAL_USER}
+      ETHEREAL_PASSWORD: ${ETHEREAL_PASSWORD}
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY}
+      MIN_DELAY_MS: ${MIN_DELAY_MS}
+      MAX_EMAILS_PER_HOUR: ${MAX_EMAILS_PER_HOUR}
+
+  worker:
+    build: ./backend
+    restart: unless-stopped
+    command: ["node", "dist/workers/emailWorker.js"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: "postgresql://reachinbox:reachinbox@postgres:5432/reachinbox?schema=public"
+      REDIS_URL: "redis://redis:6379"
+      NODE_ENV: production
+      ETHEREAL_HOST: ${ETHEREAL_HOST}
+      ETHEREAL_PORT: ${ETHEREAL_PORT}
+      ETHEREAL_USER: ${ETHEREAL_USER}
+      ETHEREAL_PASSWORD: ${ETHEREAL_PASSWORD}
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY}
+      MIN_DELAY_MS: ${MIN_DELAY_MS}
+      MAX_EMAILS_PER_HOUR: ${MAX_EMAILS_PER_HOUR}
+
+  frontend:
+    build:
+      context: ./frontend
+      # Left blank so the built app calls the API via relative /api paths
+      # (same-origin through nginx's proxy below), not an absolute URL.
+      args:
+        VITE_API_URL: ${VITE_API_URL:-}
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "80:80"
+
+volumes:
+  pgdata:
+  redisdata:

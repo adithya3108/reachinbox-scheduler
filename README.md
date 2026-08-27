@@ -299,52 +299,108 @@ With Docker infra up and `backend`/`frontend` both running (`npm run dev` + `npm
 
 ## 16. Deployment
 
-**Frontend → Vercel. Backend (Postgres + Redis + API + worker) → one free Hugging Face Space
-(Docker SDK).**
+**A single AWS EC2 instance running the full stack via Docker Compose** — Postgres, Redis, the
+API, the worker, and an nginx-served frontend build, as five containers on one host
+(`docker-compose.prod.yml`). This fits AWS's free tier: a `t2.micro`/`t3.micro` instance gets
+750 hours/month free for 12 months on a new-ish account.
 
-**Trade-off, stated plainly**: bundling Postgres, Redis, the API, and the worker into a single
-container is not how you'd run this for real users — it has no persistent volume on the HF free
-tier, so a Space rebuild/restart wipes the in-container database and queue state. It is chosen
-here because it is genuinely free and requires no extra accounts. A more durable free option is
-Vercel (frontend) + Neon (managed Postgres) + Upstash (managed Redis) + Render free web service
-(API + worker) — every piece persists independently, at the cost of a few more sign-ups. Swap
-`DATABASE_URL`/`REDIS_URL` to point at those and the same code runs unchanged.
+**Trade-off, stated plainly**: everything lives on one instance, so it's a single point of
+failure and doesn't horizontally scale — fine for a demo/hiring submission, not how you'd run
+this for real production traffic (you'd split Postgres/Redis onto managed services like RDS/
+ElastiCache and run the API/worker as separately scalable services). The docker-compose
+structure already separates each concern into its own container, so that split is a config
+change, not a rewrite.
 
-### Deploying the backend to Hugging Face Spaces
+Verified locally before touching AWS: `docker compose -f docker-compose.prod.yml up -d --build`
+brings up all five containers cleanly, `/api/health` responds, and the worker starts — same
+command you'll run on the EC2 host.
 
-1. Create a new Space at https://huggingface.co/new-space with **SDK: Docker**, any visibility.
-2. Clone the Space's own git repo it gives you (a separate remote from GitHub), then copy this
-   project's `Dockerfile`, `docker/`, and `backend/` directories into it — but **keep the
-   Space's auto-generated `README.md`** (it carries the YAML frontmatter Hugging Face needs to
-   detect the Docker SDK; don't overwrite it with this project's README).
-3. In the Space's **Settings → Repository secrets**, add:
-   ```
-   GOOGLE_CLIENT_ID=...
-   GOOGLE_CLIENT_SECRET=...
-   GOOGLE_CALLBACK_URL=https://<your-space>.hf.space/api/auth/google/callback
-   FRONTEND_URL=https://<your-vercel-app>.vercel.app
-   SESSION_SECRET=<a long random string>
-   ETHEREAL_USER=...
-   ETHEREAL_PASSWORD=...
-   WORKER_CONCURRENCY=5
-   MIN_DELAY_MS=2000
-   MAX_EMAILS_PER_HOUR=100
-   ```
-   (`DATABASE_URL`, `REDIS_URL`, `PORT`, and `NODE_ENV` are already baked into the `Dockerfile`
-   for the in-container Postgres/Redis — don't override them.)
-4. Add `https://<your-space>.hf.space/api/auth/google/callback` as an authorized redirect URI
-   in the Google Cloud Console (same place as the local setup in section 4).
-5. Commit and push to the Space's git remote. Hugging Face builds the `Dockerfile` and starts
-   the container automatically; watch the build logs in the Space's **Logs** tab. First boot
-   takes longer (Postgres initdb + `prisma migrate deploy`).
-6. Confirm `https://<your-space>.hf.space/api/health` returns `{"data":{"ok":true}}`.
+### 1. Launch the EC2 instance
 
-### Deploying the frontend to Vercel
+1. AWS Console → EC2 → Launch instance. AMI: **Ubuntu 22.04 LTS**. Instance type: **t2.micro**
+   (or t3.micro) to stay in the free tier.
+2. Create/select a key pair for SSH access.
+3. Security group: allow inbound **22** (SSH) and **80** (the app) from `0.0.0.0/0` (restrict
+   22 to your own IP if you can). Port 4000 does **not** need to be public — nginx proxies
+   `/api/` to the API container internally, so the app is single-origin from the browser.
+4. Allocate an **Elastic IP** and associate it with the instance — a plain EC2 public IP changes
+   on stop/start, which would break your Google OAuth redirect URI and CORS config every time.
+5. Launch, then SSH in: `ssh -i your-key.pem ubuntu@<elastic-ip>`.
 
-1. Import this GitHub repo into Vercel, set **Root Directory** to `frontend/`.
-2. Framework preset: Vite (auto-detected).
-3. Add environment variable: `VITE_API_URL=https://<your-space>.hf.space`.
-4. Deploy. `frontend/vercel.json` already handles SPA client-side routing (React Router).
-5. Update the Space's `FRONTEND_URL` secret (step 3 above) to match the final Vercel URL, and
-   redeploy the Space if it was set to a placeholder first — CORS and the OAuth redirect both
-   depend on it matching exactly.
+### 2. Install Docker on the instance
+
+```bash
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl gnupg
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+sudo apt-get update
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+sudo usermod -aG docker $USER
+# log out and back in for the group change to take effect
+```
+
+### 3. Deploy the app
+
+```bash
+git clone https://github.com/<you>/reachinbox-scheduler.git
+cd reachinbox-scheduler
+```
+
+Create `.env.prod` on the instance (never commit this):
+
+```
+FRONTEND_URL=http://<elastic-ip>
+SESSION_SECRET=<a long random string>
+COOKIE_SECURE=false
+GOOGLE_CLIENT_ID=...
+GOOGLE_CLIENT_SECRET=...
+GOOGLE_CALLBACK_URL=http://<elastic-ip>/api/auth/google/callback
+ETHEREAL_HOST=smtp.ethereal.email
+ETHEREAL_PORT=587
+ETHEREAL_USER=...
+ETHEREAL_PASSWORD=...
+WORKER_CONCURRENCY=5
+MIN_DELAY_MS=2000
+MAX_EMAILS_PER_HOUR=100
+VITE_API_URL=
+```
+
+Note `GOOGLE_CALLBACK_URL` uses port 80, not 4000 — the browser only ever talks to nginx;
+`VITE_API_URL` is intentionally blank so the built frontend calls `/api/...` as a relative path
+(same origin as the page, proxied to the API container internally). `COOKIE_SECURE=false`
+because this setup serves plain HTTP; flip it to `true` only once you put HTTPS in front (see
+the note at the end of this section).
+
+Then:
+
+```bash
+docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
+```
+
+This builds and starts all five containers; the `api` service runs `prisma migrate deploy`
+before starting, so the schema is applied automatically on first boot.
+
+### 4. Wire up Google OAuth
+
+In Google Cloud Console → Credentials, add:
+- Authorized redirect URI: `http://<elastic-ip>/api/auth/google/callback`
+- Authorized JavaScript origin: `http://<elastic-ip>`
+
+### 5. Verify
+
+```bash
+curl http://<elastic-ip>/api/health   # {"data":{"ok":true}}
+docker compose -f docker-compose.prod.yml logs -f worker
+```
+
+Visit `http://<elastic-ip>` in a browser, sign in with Google, and schedule a campaign exactly
+as in the local demo (section 15).
+
+**Note on HTTPS**: this setup uses plain HTTP over the Elastic IP, which keeps the free-tier
+setup simple but means Google OAuth's "unverified/insecure" warnings may appear. The nginx
+same-origin proxy means this works correctly over plain HTTP (no cross-site cookie problem) --
+but for a real deployment, put a domain + Caddy/nginx with Let's Encrypt in front (or an AWS ALB
+with an ACM certificate), set `COOKIE_SECURE=true`, and switch `FRONTEND_URL`/`GOOGLE_CALLBACK_URL`
+to `https://`.

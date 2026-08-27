@@ -14,12 +14,11 @@ import emailRoutes from "./routes/emailRoutes";
 
 export function createApp() {
   const app = express();
-  const isProduction = process.env.NODE_ENV === "production";
-
-  // Cross-site cookies (frontend and backend on different domains in
-  // production, e.g. Vercel + Hugging Face Spaces) require SameSite=None,
-  // which browsers only honor when Secure is also set.
-  if (isProduction) {
+  // Secure cookies require HTTPS regardless of NODE_ENV -- gated on an
+  // explicit COOKIE_SECURE flag (see config/env.ts) rather than assuming
+  // "production" means "behind TLS", since e.g. the plain-HTTP EC2 demo
+  // deployment is NODE_ENV=production without a certificate in front.
+  if (env.cookieSecure) {
     app.set("trust proxy", 1);
   }
 
@@ -35,8 +34,8 @@ export function createApp() {
       saveUninitialized: false,
       cookie: {
         httpOnly: true,
-        secure: isProduction,
-        sameSite: isProduction ? "none" : "lax",
+        secure: env.cookieSecure,
+        sameSite: env.cookieSecure ? "none" : "lax",
         maxAge: 1000 * 60 * 60 * 24 * 7,
       },
     })
